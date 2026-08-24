@@ -1,5 +1,5 @@
-import { useState, useMemo } from 'react'
-import products        from './data/products'
+import { useEffect, useMemo, useState } from 'react'
+import staticProducts  from './data/products'
 import LoginScreen     from './components/LoginScreen'
 import Header          from './components/Header'
 import Sidebar         from './components/Sidebar'
@@ -9,20 +9,74 @@ import CartDrawer      from './components/CartDrawer'
 import DeviceFrame     from './components/DeviceFrame'
 import './App.css'
 
-const PER_PAGE_GRID = 12
-const PER_PAGE_LIST = 8
-const MAX_PRICE     = 2500
+const PER_PAGE_GRID     = 12
+const PER_PAGE_LIST     = 8
+const DEFAULT_MAX_PRICE = 2500
+const PRODUCTS_API_URL  = import.meta.env.VITE_PRODUCTS_API_URL || 'http://localhost:8082/api/v1/products'
+
+function asNumber(value, fallback = 0) {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+
+function asOptionalNumber(value) {
+  if (value == null || value === '') {
+    return null
+  }
+
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function normalizeProduct(product, index) {
+  return {
+    id: product.id ?? product.productId ?? index + 1,
+    name: product.name ?? product.productName ?? 'Unnamed product',
+    brand: product.brand ?? product.manufacturer ?? 'Unknown brand',
+    category: product.category ?? product.categoryName ?? 'Uncategorized',
+    price: asNumber(product.price),
+    originalPrice: asOptionalNumber(product.originalPrice),
+    rating: asNumber(product.rating, 0),
+    reviews: asNumber(product.reviews ?? product.reviewCount, 0),
+    badge: product.badge ?? product.label ?? null,
+    stock: asNumber(product.stock ?? product.inventory ?? product.quantity, 0),
+    image: product.image ?? product.imageUrl ?? product.thumbnail ?? '',
+    description: product.description ?? product.summary ?? 'No description available.',
+    specs: Array.isArray(product.specs) ? product.specs : [],
+    tags: Array.isArray(product.tags) ? product.tags : [],
+  }
+}
+
+function extractProducts(payload) {
+  if (Array.isArray(payload)) {
+    return payload
+  }
+
+  const candidates = [payload?.products, payload?.data, payload?.content, payload?.items]
+  const collection = candidates.find(Array.isArray)
+
+  if (!collection) {
+    throw new Error('The API response did not contain a product list.')
+  }
+
+  return collection
+}
 
 export default function App() {
   // auth
   const [isLoggedIn, setIsLoggedIn] = useState(false)
   const [email, setEmail]           = useState('')
+  const [products, setProducts]     = useState([])
+  const [productsLoading, setProductsLoading] = useState(false)
+  const [productsError, setProductsError]     = useState('')
+  const [reloadKey, setReloadKey]             = useState(0)
 
   // filters
   const [search,         setSearch]         = useState('')
   const [category,       setCategory]       = useState('All')
   const [selectedBrands, setSelectedBrands] = useState(new Set())
-  const [priceRange,     setPriceRange]     = useState([0, MAX_PRICE])
+  const [priceRange,     setPriceRange]     = useState([0, DEFAULT_MAX_PRICE])
+  const [hasCustomPriceRange, setHasCustomPriceRange] = useState(false)
   const [minRating,      setMinRating]      = useState(0)
   const [sortBy,         setSortBy]         = useState('featured')
 
@@ -38,22 +92,88 @@ export default function App() {
   const [cartOpen, setCartOpen] = useState(false)
   const [wishlist, setWishlist] = useState(new Set())
 
+  useEffect(() => {
+    if (!isLoggedIn) {
+      return
+    }
+
+    const abortController = new AbortController()
+
+    async function loadProducts() {
+      setProductsLoading(true)
+      setProductsError('')
+
+      try {
+        const response = await fetch(PRODUCTS_API_URL, {
+          credentials: 'include',
+          signal: abortController.signal,
+        })
+
+        if (!response.ok) {
+          throw new Error(`API returned ${response.status} — falling back to local data.`)
+        }
+
+        const payload = await response.json()
+        const nextProducts = extractProducts(payload).map(normalizeProduct)
+        setProducts(nextProducts)
+        setProductsError('')
+      } catch (error) {
+        if (error.name === 'AbortError') {
+          return
+        }
+
+        // Fall back to the bundled static product list
+        setProducts(staticProducts)
+        setProductsError(`Live API unavailable (${error.message}) — showing local catalogue.`)
+      } finally {
+        if (!abortController.signal.aborted) {
+          setProductsLoading(false)
+        }
+      }
+    }
+
+    loadProducts()
+
+    return () => abortController.abort()
+  }, [isLoggedIn, reloadKey])
+
+  useEffect(() => {
+    setSelectedProduct(currentProduct => {
+      if (!currentProduct) {
+        return null
+      }
+
+      return products.find(product => product.id === currentProduct.id) ?? null
+    })
+  }, [products])
+
+  const maxPrice = useMemo(() => {
+    const highestPrice = products.reduce((currentMax, product) => Math.max(currentMax, product.price), 0)
+    if (highestPrice <= 0) {
+      return DEFAULT_MAX_PRICE
+    }
+
+    return Math.ceil(highestPrice / 100) * 100
+  }, [products])
+
+  const effectivePriceRange = hasCustomPriceRange ? priceRange : [priceRange[0], maxPrice]
+
   // derived: categories + brands + counts
   const allCategories = useMemo(() => {
     const cats = [...new Set(products.map(p => p.category))].sort()
     return ['All', ...cats]
-  }, [])
+  }, [products])
 
   const allBrands = useMemo(
     () => [...new Set(products.map(p => p.brand))].sort(),
-    [],
+    [products],
   )
 
   const categoryCounts = useMemo(() => {
     const counts = { All: products.length }
     products.forEach(p => { counts[p.category] = (counts[p.category] || 0) + 1 })
     return counts
-  }, [])
+  }, [products])
 
   // filtered + sorted products
   const filtered = useMemo(() => {
@@ -61,7 +181,7 @@ export default function App() {
     return products
       .filter(p => category === 'All' || p.category === category)
       .filter(p => selectedBrands.size === 0 || selectedBrands.has(p.brand))
-      .filter(p => p.price >= priceRange[0] && p.price <= priceRange[1])
+      .filter(p => p.price >= effectivePriceRange[0] && p.price <= effectivePriceRange[1])
       .filter(p => p.rating >= minRating)
       .filter(p => !q || p.name.toLowerCase().includes(q) ||
         p.brand.toLowerCase().includes(q) ||
@@ -74,14 +194,21 @@ export default function App() {
         if (sortBy === 'newest')     return b.id - a.id
         return 0
       })
-  }, [category, selectedBrands, priceRange, minRating, search, sortBy])
+  }, [category, effectivePriceRange, minRating, products, search, selectedBrands, sortBy])
 
   const perPage    = viewMode === 'grid' ? PER_PAGE_GRID : PER_PAGE_LIST
   const totalPages = Math.ceil(filtered.length / perPage)
   const paged      = filtered.slice((page - 1) * perPage, page * perPage)
 
   const hasFilters = category !== 'All' || selectedBrands.size > 0 ||
-    minRating > 0 || priceRange[0] > 0 || priceRange[1] < MAX_PRICE || !!search.trim()
+    minRating > 0 || effectivePriceRange[0] > 0 ||
+    (hasCustomPriceRange && effectivePriceRange[1] < maxPrice) || !!search.trim()
+
+  useEffect(() => {
+    if (page > 1 && totalPages > 0 && page > totalPages) {
+      setPage(totalPages)
+    }
+  }, [page, totalPages])
 
   // cart helpers
   function addToCart(product) {
@@ -125,7 +252,8 @@ export default function App() {
   function handleSearch(val) { setSearch(val); setPage(1); setSelectedProduct(null) }
 
   function clearFilters() {
-    setCategory('All'); setSelectedBrands(new Set()); setPriceRange([0, MAX_PRICE])
+    setCategory('All'); setSelectedBrands(new Set()); setPriceRange([0, DEFAULT_MAX_PRICE])
+    setHasCustomPriceRange(false)
     setMinRating(0); setSearch(''); setPage(1)
   }
 
@@ -160,8 +288,13 @@ export default function App() {
           brands={allBrands}
           selectedBrands={selectedBrands}
           onBrandToggle={toggleBrand}
-          priceRange={priceRange}
-          onPriceRangeChange={r => { setPriceRange(r); setPage(1) }}
+          priceRange={effectivePriceRange}
+          maxPrice={maxPrice}
+          onPriceRangeChange={r => {
+            setPriceRange(r)
+            setHasCustomPriceRange(true)
+            setPage(1)
+          }}
           minRating={minRating}
           onRatingChange={r => { setMinRating(r); setPage(1) }}
           hasFilters={hasFilters}
@@ -278,7 +411,21 @@ export default function App() {
               )}
 
               {/* Products */}
-              {paged.length === 0 ? (
+              {productsLoading ? (
+                <div className="api-state">
+                  <div className="api-state-icon" aria-hidden="true">⏳</div>
+                  <h3>Loading products</h3>
+                  <p>Fetching the latest catalogue from the API.</p>
+                </div>
+              ) : (
+              <>
+                {productsError && (
+                  <div className="api-fallback-banner" role="status">
+                    <span>{productsError}</span>
+                    <button onClick={() => setReloadKey(key => key + 1)}>Retry live API</button>
+                  </div>
+                )}
+                {paged.length === 0 ? (
                 <div className="empty-state">
                   <div className="empty-icon" aria-hidden="true">🔍</div>
                   <h3>No products match your filters</h3>
@@ -329,8 +476,8 @@ export default function App() {
                     Next →
                   </button>
                 </nav>
-              )}
-            </>
+              )}              </>
+              )}            </>
           )}
         </main>
       </div>

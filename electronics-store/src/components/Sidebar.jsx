@@ -19,13 +19,11 @@ export default function Sidebar({
   categories, categoryCounts,
   selectedCategory, onCategoryChange,
   brands, selectedBrands, onBrandToggle,
-  priceRange, onPriceRangeChange,
+  priceRange, maxPrice, onPriceRangeChange,
   minRating, onRatingChange,
   hasFilters, onClearFilters,
   mobileOpen, onMobileClose,
 }) {
-  const maxPrice = 2500
-
   return (
     <>
       {/* Mobile overlay */}

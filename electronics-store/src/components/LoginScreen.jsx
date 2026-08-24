@@ -1,12 +1,15 @@
 import { useState } from 'react'
 
+const LOGIN_API_URL = import.meta.env.VITE_LOGIN_API_URL || 'http://localhost:8081/api/v1/customers/login'
+
 export default function LoginScreen({ onLogin }) {
   const [email, setEmail]       = useState('')
   const [password, setPassword] = useState('')
   const [error, setError]       = useState('')
   const [loading, setLoading]   = useState(false)
+  const [usingFallback, setUsingFallback] = useState(false)
 
-  function handleSubmit(e) {
+  async function handleSubmit(e) {
     e.preventDefault()
     if (!email.trim() || !email.includes('@')) {
       setError('Please enter a valid email address.')
@@ -14,8 +17,32 @@ export default function LoginScreen({ onLogin }) {
     }
     setError('')
     setLoading(true)
-    // Simulate async auth round-trip
-    setTimeout(() => { setLoading(false); onLogin(email) }, 600)
+
+    try {
+      const response = await fetch(LOGIN_API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ email: email.trim(), password }),
+      })
+
+      if (response.ok) {
+        setUsingFallback(false)
+        onLogin(email)
+        return
+      }
+
+      // Server reachable but rejected credentials
+      const body = await response.json().catch(() => null)
+      const msg = body?.message || body?.error || `Login failed (${response.status}).`
+      setError(msg)
+    } catch {
+      // Network error — fall back to demo mode (any valid email works)
+      setUsingFallback(true)
+      onLogin(email)
+    } finally {
+      setLoading(false)
+    }
   }
 
   return (
@@ -102,7 +129,9 @@ export default function LoginScreen({ onLogin }) {
           </button>
 
           <p className="login-demo-note">
-            Demo mode — any valid email works, password is not checked.
+            {usingFallback
+              ? 'API unavailable — running in demo mode (any valid email works).'
+              : 'Enter your credentials to sign in.'}
           </p>
         </form>
       </div>
